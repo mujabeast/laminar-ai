@@ -153,3 +153,4 @@ If a judge or tester wants to deploy it to Vercel:
 2. Set `Root Directory` to `webapp`.
 3. Add the same environment variables from `.env.local`.
 4. Deploy as a Next.js project.
+5. tbh you can also just click here https://laminar-ai.vercel.app/ i used 9 cents from my credits so go crazy!!
