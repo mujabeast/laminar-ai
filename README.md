@@ -10,14 +10,12 @@ This repository is structured with the actual Next.js app inside the `webapp/` f
 ## Repository Structure
 
 - `webapp/`: main Next.js application
-- `webapp/extension/`: Chrome extension for tab tracking and confusion capture
 - `testbench/`: judge-facing setup and run instructions
 
 ## Core Features
 
 - Webcam-based attention tracking
-- Browser-extension-based tab behavior tracking
-- Confusion screenshot capture
+- In-app understanding coach with file uploads
 - Attention dashboard with AI summaries and visuals
 - Academic dashboard with merged weakness reports and AI analysis
 - Local per-profile storage on each browser
@@ -29,7 +27,6 @@ This repository is structured with the actual Next.js app inside the `webapp/` f
 - TypeScript
 - Tailwind CSS
 - OpenAI Responses API
-- Chrome Extension (Manifest V3)
 
 ## Local Setup
 

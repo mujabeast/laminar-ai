@@ -27,7 +27,6 @@ type StudySetupLike = {
   topic?: string;
   focusDomain?: string;
   targetMinutes?: number;
-  maxTabSwitches?: number;
   maxLookAwaySpikes?: number;
   guardStyle?: string;
 } | null;
@@ -41,22 +40,6 @@ type SampleLike = {
 type WebcamSessionLike = {
   totalSeconds?: number;
   samples?: SampleLike[];
-} | null;
-
-type TabEventLike = {
-  type?: string;
-};
-
-type TabSpanLike = {
-  startTs: number;
-  endTs: number;
-  durationMs: number;
-  domain?: string;
-};
-
-type ExtensionSessionLike = {
-  tabEvents?: TabEventLike[];
-  tabSpans?: TabSpanLike[];
 } | null;
 
 type AttentionReportLike = {
@@ -172,50 +155,6 @@ function formatMinutesSeconds(totalSeconds: number) {
   return `${minutes} min ${seconds} sec`;
 }
 
-function normalizeFocusDomain(input: string) {
-  const trimmed = input.trim().toLowerCase();
-  if (!trimmed) return "";
-
-  try {
-    const withProtocol = trimmed.startsWith("http") ? trimmed : `https://${trimmed}`;
-    return new URL(withProtocol).hostname.replace(/^www\./, "");
-  } catch {
-    return trimmed.replace(/^www\./, "").replace(/\/.*$/, "");
-  }
-}
-
-function domainMatchesFocus(domain: string, focusDomain: string) {
-  const normalizedDomain = normalizeFocusDomain(domain);
-  const normalizedFocus = normalizeFocusDomain(focusDomain);
-  if (!normalizedFocus) return false;
-
-  return (
-    normalizedDomain === normalizedFocus ||
-    normalizedDomain.endsWith(`.${normalizedFocus}`) ||
-    normalizedFocus.endsWith(`.${normalizedDomain}`)
-  );
-}
-
-function countAwaySwitchesFromFocus(tabSpans: TabSpanLike[], focusDomain: string) {
-  const normalizedFocus = normalizeFocusDomain(focusDomain);
-  const spans = [...tabSpans].sort((a, b) => a.startTs - b.startTs);
-
-  if (!spans.length) return normalizedFocus ? 0 : null;
-  if (!normalizedFocus) return Math.max(0, spans.length - 1);
-
-  let count = 0;
-
-  for (let index = 0; index < spans.length - 1; index += 1) {
-    const currentDomain = spans[index].domain || "";
-    const nextDomain = spans[index + 1].domain || "";
-    if (domainMatchesFocus(currentDomain, normalizedFocus) && !domainMatchesFocus(nextDomain, normalizedFocus)) {
-      count += 1;
-    }
-  }
-
-  return count;
-}
-
 function countLookAwaySpikes(samples: SampleLike[], thresholdMs = 2000) {
   let spikes = 0;
   let absentStart: number | null = null;
@@ -252,161 +191,42 @@ function detectLateCrash(samples: SampleLike[]) {
   return firstRate - lastRate >= 0.25;
 }
 
-function domainType(domain: string) {
-  const normalized = domain.toLowerCase();
-
-  if (
-    normalized.includes("netflix") ||
-    normalized.includes("tiktok") ||
-    normalized.includes("instagram") ||
-    normalized.includes("youtube.com/shorts") ||
-    normalized.includes("facebook") ||
-    normalized.includes("x.com") ||
-    normalized.includes("twitter") ||
-    normalized.includes("reddit") ||
-    normalized.includes("twitch")
-  ) {
-    return "sedative";
-  }
-
-  if (
-    normalized.includes("chat.openai.com") ||
-    normalized.includes("chatgpt") ||
-    normalized.includes("claude") ||
-    normalized.includes("perplexity") ||
-    normalized.includes("stack") ||
-    normalized.includes("github") ||
-    normalized.includes("docs") ||
-    normalized.includes("wikipedia") ||
-    normalized.includes("geeksforgeeks")
-  ) {
-    return "helper";
-  }
-
-  if (
-    normalized.includes("ntu") ||
-    normalized.includes("ntulearn") ||
-    normalized.includes("canvas") ||
-    normalized.includes("blackboard") ||
-    normalized.includes("coursera") ||
-    normalized.includes("edx") ||
-    normalized.includes("khanacademy") ||
-    normalized.includes("youtube")
-  ) {
-    return "study";
-  }
-
-  return "other";
-}
-
-function computeSwitchRate(tabEvents: TabEventLike[], tabSpans: TabSpanLike[]) {
-  const totalMs = tabSpans.reduce((sum, span) => sum + (span.durationMs || 0), 0);
-  if (totalMs <= 0) return 0;
-
-  const switches =
-    tabEvents.filter((event) => event.type === "tab_activated").length ||
-    Math.max(0, tabSpans.length - 1);
-
-  return switches / (totalMs / 600_000);
-}
-
-function sumTimeByType(tabSpans: TabSpanLike[]) {
-  let sedativeMs = 0;
-  let helperMs = 0;
-  let studyMs = 0;
-  let otherMs = 0;
-
-  for (const span of tabSpans) {
-    const durationMs = span.durationMs || 0;
-    const type = domainType((span.domain || "unknown").toLowerCase());
-
-    if (type === "sedative") sedativeMs += durationMs;
-    else if (type === "helper") helperMs += durationMs;
-    else if (type === "study") studyMs += durationMs;
-    else otherMs += durationMs;
-  }
-
-  return {
-    sedativeMs,
-    helperMs,
-    studyMs,
-    otherMs,
-  };
-}
-
-function summarizeDomainDurations(tabSpans: TabSpanLike[]) {
-  const totals: Record<string, number> = {};
-
-  for (const span of tabSpans) {
-    const domain = (span.domain || "unknown").toLowerCase();
-    totals[domain] = (totals[domain] ?? 0) + (span.durationMs || 0);
-  }
-
-  return Object.entries(totals)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 5)
-    .map(([domain, durationMs]) => ({
-      domain,
-      minutes: Math.round(durationMs / 60_000),
-    }));
-}
-
 function computeProfileMetrics(args: {
   setup: StudySetupLike;
   webcam: WebcamSessionLike;
-  extensionSession: ExtensionSessionLike;
 }) {
   const samples = args.webcam?.samples ?? [];
   const totalSeconds = Number(args.webcam?.totalSeconds ?? 0);
-  const tabSpans = args.extensionSession?.tabSpans ?? [];
-  const tabEvents = args.extensionSession?.tabEvents ?? [];
   const attention = samples.length
     ? samples.filter(isSampleAttentive).length / samples.length
     : 0;
   const lookAwaySpikes = samples.length ? countLookAwaySpikes(samples, 2000) : 0;
   const lateCrash = samples.length ? detectLateCrash(samples) : false;
-  const switchRate = tabSpans.length ? computeSwitchRate(tabEvents, tabSpans) : 0;
-  const awaySwitches =
-    tabSpans.length && args.setup?.focusDomain
-      ? countAwaySwitchesFromFocus(tabSpans, args.setup.focusDomain)
-      : null;
-  const timeByType = tabSpans.length ? sumTimeByType(tabSpans) : null;
 
   let fusionMode = "Deep Worker";
-  if (switchRate >= 6) fusionMode = "Split Focus";
-  if (lateCrash && switchRate >= 3) fusionMode = "Late Crasher";
-  if (
-    tabSpans.length &&
-    (timeByType?.helperMs ?? 0) >= 180_000
-  ) {
-    fusionMode = "Helper Reliant";
+  if (samples.length && attention < 0.55) fusionMode = "Seat-Leaver";
+  else if (lateCrash) fusionMode = "Late Crasher";
+  else if (lookAwaySpikes >= Math.max(4, args.setup?.maxLookAwaySpikes ?? 4)) {
+    fusionMode = "Unsteady Focus";
   }
-  if (samples.length && attention < 0.65) fusionMode = "Seat-Leaver";
 
   const base = samples.length ? attention * 100 : 70;
-  const sedativePenaltyMinutes = timeByType ? timeByType.sedativeMs / 60_000 : 0;
-  const awaySwitchPenalty = awaySwitches ? awaySwitches * 2 : 0;
-  const penalty =
-    lookAwaySpikes * 2 +
-    switchRate * 3 +
-    awaySwitchPenalty +
-    sedativePenaltyMinutes * 2 +
-    (lateCrash ? 10 : 0);
+  const penalty = lookAwaySpikes * 2 + (lateCrash ? 10 : 0);
 
   return {
     totalSeconds,
     attention,
     lookAwaySpikes,
     lateCrash,
-    switchRate,
-    awaySwitches,
+    switchRate: 0,
+    awaySwitches: null,
     frictionClusters: [],
-    timeByType,
+    timeByType: null,
     fusionMode,
     score: Math.max(0, Math.min(100, Math.round(base - penalty))),
     frictionToHelper: 0,
     frictionToSedative: 0,
-    topDomains: summarizeDomainDurations(tabSpans),
+    topDomains: [],
   };
 }
 
@@ -496,7 +316,6 @@ export async function callOpenAIJson<T>(args: {
 export function buildProfileContext(args: {
   setup: StudySetupLike;
   webcam: WebcamSessionLike;
-  extensionSession: ExtensionSessionLike;
 }) {
   const metrics = computeProfileMetrics(args);
 
@@ -508,7 +327,6 @@ export function buildProfileContext(args: {
           topic: args.setup.topic,
           focusDomain: args.setup.focusDomain,
           targetMinutes: args.setup.targetMinutes,
-          maxTabSwitches: args.setup.maxTabSwitches,
           maxLookAwaySpikes: args.setup.maxLookAwaySpikes,
           guardStyle: args.setup.guardStyle,
         }
@@ -518,17 +336,9 @@ export function buildProfileContext(args: {
       attention: pct(metrics.attention),
       lookAwaySpikes: metrics.lookAwaySpikes,
       lateCrash: metrics.lateCrash,
-      switchRate: Number(metrics.switchRate.toFixed(2)),
-      awaySwitches: metrics.awaySwitches,
       frictionClusterCount: metrics.frictionClusters.length,
-      helperMinutes: Math.round((metrics.timeByType?.helperMs ?? 0) / 60_000),
-      sedativeMinutes: Math.round((metrics.timeByType?.sedativeMs ?? 0) / 60_000),
-      studyMinutes: Math.round((metrics.timeByType?.studyMs ?? 0) / 60_000),
       fusionMode: metrics.fusionMode,
       score: metrics.score,
-      topDomains: metrics.topDomains,
-      frictionToHelper: metrics.frictionToHelper,
-      frictionToSedative: metrics.frictionToSedative,
     },
   };
 }

@@ -1,6 +1,5 @@
 "use client";
 
-import Image from "next/image";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
@@ -14,21 +13,10 @@ import {
   STORAGE_KEYS,
   type AcademicMergedTopic,
   type AcademicOverviewRecord,
-  type AttentionReportRecord,
-  type ConfusionAnalysisRecord,
-  type ExtensionHistoryEntry,
-  type ExtensionSession,
-  type StudyRunRecord,
-  type StudySetup,
-  type UnderstandingSessionRecord,
   type UnderstandingChecklistState,
-  type WebcamSession,
+  type UnderstandingSessionRecord,
   isAcademicOverviewRecordLike,
-  isExtensionSessionLike,
-  isStudyRunRecordLike,
-  isStudySetupLike,
   isUnderstandingSessionLike,
-  resolveStudyRun,
   setStoredJson,
   useCurrentProfile,
   useStoredJson,
@@ -38,7 +26,6 @@ type AcademicItem = {
   id: string;
   createdAt: number;
   title: string;
-  likelyTask: string;
   explanation: string;
   understood: boolean;
   topicHint: string;
@@ -73,8 +60,8 @@ function fallbackMergedTopics(items: AcademicItem[]): AcademicMergedTopic[] {
   >();
 
   for (const item of items) {
-    const rawLabel = item.topicHint.trim() || item.likelyTask.trim() || item.title.trim();
-    const key = normalizeTopicToken(rawLabel) || normalizeTopicToken(item.likelyTask) || item.id;
+    const rawLabel = item.topicHint.trim() || item.title.trim();
+    const key = normalizeTopicToken(rawLabel) || item.id;
     const existing = grouped.get(key) ?? {
       label: rawLabel,
       aliases: new Set<string>(),
@@ -82,7 +69,6 @@ function fallbackMergedTopics(items: AcademicItem[]): AcademicMergedTopic[] {
     };
 
     existing.aliases.add(rawLabel);
-    if (item.topicHint.trim()) existing.aliases.add(item.topicHint.trim());
     existing.itemIds.push(item.id);
 
     if (rawLabel.length > existing.label.length) {
@@ -102,39 +88,6 @@ function fallbackMergedTopics(items: AcademicItem[]): AcademicMergedTopic[] {
 
 export default function AcademicDashboardPage() {
   const currentProfile = useCurrentProfile();
-  const currentSetup = useStoredJson<StudySetup | null>(
-    STORAGE_KEYS.studySetupCurrent,
-    null,
-    (value): value is StudySetup | null => value === null || isStudySetupLike(value)
-  );
-  const currentRun = useStoredJson<StudyRunRecord | null>(
-    STORAGE_KEYS.studyRunCurrent,
-    null,
-    (value): value is StudyRunRecord | null => value === null || isStudyRunRecordLike(value)
-  );
-  const webcamLast = useStoredJson<WebcamSession | null>(STORAGE_KEYS.attentionLast, null);
-  const webcamHistory = useStoredJson<WebcamSession[]>(STORAGE_KEYS.attentionHistory, [], Array.isArray);
-  const extensionLast = useStoredJson<ExtensionSession | null>(
-    STORAGE_KEYS.extensionLast,
-    null,
-    (value): value is ExtensionSession | null => value === null || isExtensionSessionLike(value)
-  );
-  const extensionHistory = useStoredJson<ExtensionHistoryEntry[]>(
-    STORAGE_KEYS.extensionHistory,
-    [],
-    Array.isArray
-  );
-  const reportHistory = useStoredJson<AttentionReportRecord[]>(
-    STORAGE_KEYS.reportHistory,
-    [],
-    Array.isArray
-  );
-  const aiConfusionByRun = useStoredJson<Record<string, ConfusionAnalysisRecord>>(
-    STORAGE_KEYS.aiConfusionByRun,
-    {},
-    (value): value is Record<string, ConfusionAnalysisRecord> =>
-      !!value && typeof value === "object" && !Array.isArray(value)
-  );
   const aiAcademicOverview = useStoredJson<AcademicOverviewRecord | null>(
     STORAGE_KEYS.aiAcademicOverview,
     null,
@@ -154,74 +107,14 @@ export default function AcademicDashboardPage() {
       Array.isArray(value) && value.every((entry) => isUnderstandingSessionLike(entry))
   );
 
-  const [confusionStatus, setConfusionStatus] = useState("");
-  const [isAnalyzingConfusion, setIsAnalyzingConfusion] = useState(false);
   const [overviewStatus, setOverviewStatus] = useState("");
   const [isGeneratingOverview, setIsGeneratingOverview] = useState(false);
   const [visualStatus, setVisualStatus] = useState("");
   const [isGeneratingVisuals, setIsGeneratingVisuals] = useState(false);
   const [academicVisuals, setAcademicVisuals] = useState<GeneratedVisualBoard | null>(null);
 
-  const resolvedRun = useMemo(
-    () =>
-      resolveStudyRun({
-        currentRun,
-        currentSetup,
-        webcamLast,
-        webcamHistory,
-        extensionLast,
-        extensionHistory,
-      }),
-    [currentRun, currentSetup, extensionHistory, extensionLast, webcamHistory, webcamLast]
-  );
-
-  const studyRunId = resolvedRun.studyRunId;
-  const currentConfusionCaptures = resolvedRun.extensionSession?.confusionCaptures ?? [];
-  const analyzableConfusionCaptures = currentConfusionCaptures.filter((capture) =>
-    Boolean(capture.screenshotDataUrl)
-  );
-  const currentConfusionAnalysis = studyRunId ? aiConfusionByRun[studyRunId] ?? null : null;
-  const currentCaptureInsights = useMemo(
-    () => new Map((currentConfusionAnalysis?.captures ?? []).map((entry) => [entry.captureId, entry])),
-    [currentConfusionAnalysis]
-  );
-
-  const reportByRunId = useMemo(
-    () =>
-      new Map(
-        reportHistory
-          .filter((report) => Boolean(report.studyRunId))
-          .map((report) => [report.studyRunId as string, report])
-      ),
-    [reportHistory]
-  );
-
-  const analyses = useMemo(
-    () => Object.values(aiConfusionByRun).sort((left, right) => right.createdAt - left.createdAt),
-    [aiConfusionByRun]
-  );
-
   const academicItems = useMemo(() => {
     const items: AcademicItem[] = [];
-
-    for (const analysis of analyses) {
-      const report = reportByRunId.get(analysis.studyRunId);
-      const topicHint = [report?.moduleName, report?.topic].filter(Boolean).join(" / ");
-
-      for (const capture of analysis.captures) {
-        const itemId = `${analysis.studyRunId}:${capture.captureId}`;
-        items.push({
-          id: itemId,
-          createdAt: report?.createdAt ?? analysis.createdAt,
-          title: capture.title,
-          likelyTask: capture.likelyTask,
-          explanation: capture.explanation,
-          understood: checklist[itemId]?.understood ?? false,
-          topicHint: topicHint || capture.likelyTask || capture.title,
-          source: "confusion",
-        });
-      }
-    }
 
     for (const session of understandingSessions) {
       for (const weakness of session.weaknesses) {
@@ -230,7 +123,6 @@ export default function AcademicDashboardPage() {
           id: itemId,
           createdAt: weakness.createdAt ?? session.createdAt,
           title: weakness.title,
-          likelyTask: weakness.title,
           explanation: weakness.explanation,
           understood: checklist[itemId]?.understood ?? false,
           topicHint: session.topic,
@@ -240,33 +132,14 @@ export default function AcademicDashboardPage() {
     }
 
     return items.sort((left, right) => right.createdAt - left.createdAt);
-  }, [analyses, checklist, reportByRunId, understandingSessions]);
+  }, [checklist, understandingSessions]);
 
   const totalItems = academicItems.length;
   const understoodItems = academicItems.filter((item) => item.understood).length;
 
   const masterySeries = useMemo(
-    () => {
-      const fromConfusion = analyses
-        .slice()
-        .sort((left, right) => left.createdAt - right.createdAt)
-        .map((analysis) => {
-          const report = reportByRunId.get(analysis.studyRunId);
-          const understood = analysis.captures.filter(
-            (capture) => checklist[`${analysis.studyRunId}:${capture.captureId}`]?.understood
-          ).length;
-          const total = analysis.captures.length;
-          const score = total ? Math.round((understood / total) * 100) : 0;
-
-          return {
-            ts: report?.createdAt ?? analysis.createdAt,
-            label: new Date(report?.createdAt ?? analysis.createdAt).toLocaleDateString(),
-            value: score,
-            detail: report ? `${report.moduleName} / ${report.topic}` : "Study run",
-          };
-        });
-
-      const fromUnderstanding = understandingSessions
+    () =>
+      understandingSessions
         .slice()
         .sort((left, right) => left.createdAt - right.createdAt)
         .map((session) => {
@@ -282,18 +155,14 @@ export default function AcademicDashboardPage() {
             value: score,
             detail: `Understanding Coach / ${session.topic}`,
           };
-        });
-
-      return [...fromConfusion, ...fromUnderstanding].sort((left, right) => left.ts - right.ts);
-    },
-    [analyses, checklist, reportByRunId, understandingSessions]
+        }),
+    [checklist, understandingSessions]
   );
 
   const fallbackTopics = useMemo(() => fallbackMergedTopics(academicItems), [academicItems]);
   const overviewIsFresh = aiAcademicOverview?.itemCount === academicItems.length;
-  const mergedTopics = overviewIsFresh && aiAcademicOverview
-    ? aiAcademicOverview.mergedTopics
-    : fallbackTopics;
+  const mergedTopics =
+    overviewIsFresh && aiAcademicOverview ? aiAcademicOverview.mergedTopics : fallbackTopics;
 
   const mergedReportGroups = useMemo(() => {
     return mergedTopics
@@ -316,6 +185,7 @@ export default function AcademicDashboardPage() {
         return rightLatest - leftLatest;
       });
   }, [academicItems, mergedTopics]);
+
   const academicVisualDatasets = useMemo<AIVisualDataset[]>(() => {
     const datasets: AIVisualDataset[] = [];
     const topGroups = mergedReportGroups.slice(0, 5);
@@ -341,7 +211,7 @@ export default function AcademicDashboardPage() {
         points: topGroups.map((group, index) => ({
           label: group.label,
           value: group.items.length,
-          color: ["#d17a44", "#0f3d3e", "#4f7d75", "#1e3a8a", "#b45309", "#7c3aed"][index % 6],
+          color: ["#d17a44", "#0f3d3e", "#4f7d75", "#1e3a8a", "#b45309"][index % 5],
         })),
       });
 
@@ -352,29 +222,12 @@ export default function AcademicDashboardPage() {
         points: topGroups.map((group, index) => ({
           label: group.label,
           value: group.items.length - group.understoodCount,
-          color: ["#0f3d3e", "#d17a44", "#4f7d75", "#1e3a8a", "#b45309", "#7c3aed"][index % 6],
+          color: ["#0f3d3e", "#d17a44", "#4f7d75", "#1e3a8a", "#b45309"][index % 5],
         })),
       });
     }
 
     if (academicItems.length > 0) {
-      const sourceCounts = new Map<string, number>();
-      for (const item of academicItems) {
-        const label = item.source === "confusion" ? "Screenshot confusion" : "Understanding coach";
-        sourceCounts.set(label, (sourceCounts.get(label) ?? 0) + 1);
-      }
-
-      datasets.push({
-        id: "source_mix",
-        label: "Weakness source mix",
-        accent: "#0f3d3e",
-        points: [...sourceCounts.entries()].map(([label, value], index) => ({
-          label,
-          value,
-          color: ["#0f3d3e", "#d17a44", "#4f7d75", "#1e3a8a"][index % 4],
-        })),
-      });
-
       const recentCounts = new Map<string, number>();
       for (const item of academicItems.slice(0, 40)) {
         const label = new Date(item.createdAt).toLocaleDateString();
@@ -385,17 +238,16 @@ export default function AcademicDashboardPage() {
         id: "recent_flags",
         label: "Weakness log density",
         accent: "#7c3aed",
-        points: [...recentCounts.entries()]
-          .slice(0, 6)
-          .map(([label, value]) => ({
-            label,
-            value,
-          })),
+        points: [...recentCounts.entries()].slice(0, 6).map(([label, value]) => ({
+          label,
+          value,
+        })),
       });
     }
 
     return datasets.filter((dataset) => dataset.points.length > 0);
   }, [academicItems, masterySeries, mergedReportGroups]);
+
   const academicVisualSignature = JSON.stringify(
     academicVisualDatasets.map((dataset) => ({
       id: dataset.id,
@@ -410,44 +262,6 @@ export default function AcademicDashboardPage() {
       current?.signature === academicVisualSignature ? current : null
     );
   }, [academicVisualSignature]);
-
-  async function analyzeConfusionCaptures() {
-    if (!studyRunId || analyzableConfusionCaptures.length === 0) return;
-
-    setIsAnalyzingConfusion(true);
-    setConfusionStatus("Analyzing saved screenshots...");
-
-    try {
-      const response = await fetch("/api/ai/confusion", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          studyRunId,
-          setup: resolvedRun.setup,
-          captures: analyzableConfusionCaptures,
-        }),
-      });
-      const payload = (await response.json()) as
-        | { analysis?: ConfusionAnalysisRecord; error?: string }
-        | undefined;
-
-      if (!response.ok || !payload?.analysis) {
-        throw new Error(payload?.error || "Confusion analysis failed.");
-      }
-
-      setStoredJson(STORAGE_KEYS.aiConfusionByRun, {
-        ...aiConfusionByRun,
-        [studyRunId]: payload.analysis,
-      });
-      setConfusionStatus("Confusion analysis saved.");
-    } catch (error) {
-      setConfusionStatus(error instanceof Error ? error.message : "Confusion analysis failed.");
-    } finally {
-      setIsAnalyzingConfusion(false);
-    }
-  }
 
   async function generateAcademicOverview() {
     if (academicItems.length === 0) return;
@@ -533,14 +347,8 @@ export default function AcademicDashboardPage() {
           datasets: academicVisualDatasets.map((dataset) => ({
             id: dataset.id,
             label: dataset.label,
-            defaultChartType:
-              dataset.id === "source_mix" ? "donut" : dataset.id === "mastery_trend" ? "line" : "bar",
-            supportedChartTypes:
-              dataset.id === "source_mix"
-                ? ["donut", "bar"]
-                : dataset.id === "mastery_trend"
-                  ? ["line", "bar"]
-                  : ["bar", "donut"],
+            defaultChartType: dataset.id === "mastery_trend" ? "line" : "bar",
+            supportedChartTypes: dataset.id === "mastery_trend" ? ["line", "bar"] : ["bar", "donut"],
             note: dataset.label,
             points: dataset.points.map((point) => ({
               label: point.label,
@@ -595,13 +403,13 @@ export default function AcademicDashboardPage() {
           </div>
           <div className="flex flex-wrap gap-3">
             <Link className="button-secondary" href="/focus">
-              New Session
+              New session
             </Link>
             <Link className="button-secondary" href="/understanding">
-              Understanding Coach
+              Understanding coach
             </Link>
             <Link className="button-secondary" href="/dashboard">
-              Attention Dashboard
+              Attention dashboard
             </Link>
             <Link className="button-secondary" href="/history">
               History
@@ -611,7 +419,7 @@ export default function AcademicDashboardPage() {
 
         <section className="grid gap-4 md:grid-cols-3">
           <StatCard label="Merged topics" value={String(mergedReportGroups.length)} hint="combined by AI or local fallback" />
-          <StatCard label="Confusion items" value={String(totalItems)} hint="all tracked weak areas" />
+          <StatCard label="Weakness items" value={String(totalItems)} hint="all tracked weak areas" />
           <StatCard
             label="Understood now"
             value={totalItems ? `${Math.round((understoodItems / totalItems) * 100)}%` : "-"}
@@ -637,9 +445,8 @@ export default function AcademicDashboardPage() {
           {overviewStatus ? <div className="text-sm text-slate-600">{overviewStatus}</div> : null}
           {!overviewIsFresh || !aiAcademicOverview ? (
             <p className="text-sm text-slate-600">
-              Generate the AI overview to merge similar topics such as differently formatted
-              Laplace-transform entries and get a higher-level diagnosis of the student&apos;s
-              academic pattern.
+              Generate the AI overview to merge similar topics and get a higher-level diagnosis of
+              the student&apos;s academic pattern.
             </p>
           ) : (
             <div className="grid gap-4 lg:grid-cols-2">
@@ -672,10 +479,10 @@ export default function AcademicDashboardPage() {
           </div>
 
           {mergedReportGroups.length === 0 ? (
-            <p className="text-sm text-slate-600">
-              No saved confusion analysis yet. Run the screenshot analysis or use the understanding
-              coach first.
-            </p>
+            <div className="rounded-[1.5rem] border border-slate-200 bg-white/80 px-5 py-5 text-sm text-slate-600">
+              No saved understanding data yet. Open Understanding Coach, describe what the student
+              is stuck on, and Laminar.AI will start building this report.
+            </div>
           ) : (
             <div className="space-y-6">
               {mergedReportGroups.map((group) => (
@@ -708,7 +515,7 @@ export default function AcademicDashboardPage() {
                           <div className="space-y-2 text-sm text-slate-700">
                             <div className="flex flex-wrap items-center gap-3">
                               <div className="text-base font-semibold text-slate-950">
-                                {item.likelyTask || item.title}
+                                {item.title}
                               </div>
                               <span className="rounded-full bg-slate-950/5 px-3 py-1 text-xs font-medium text-slate-600">
                                 Flagged {new Date(item.createdAt).toLocaleDateString()}
@@ -790,8 +597,7 @@ export default function AcademicDashboardPage() {
               {!academicVisualsAreFresh || !academicVisuals ? (
                 <p className="text-sm leading-7 text-slate-600">
                   Generate the visual board to let AI choose the most useful academic charts from
-                  the merged weakness log, mastery history, and source mix already stored in
-                  Laminar.AI.
+                  the merged weakness log and mastery history already stored in Laminar.AI.
                 </p>
               ) : (
                 <AIVisualGallery
@@ -802,75 +608,6 @@ export default function AcademicDashboardPage() {
               )}
             </div>
           </div>
-        </section>
-
-        <section className="panel space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <p className="eyebrow">Current run</p>
-              <h2 className="text-xl font-semibold text-slate-950">Do not understand screenshots</h2>
-            </div>
-            <button
-              className="button-primary shadow-[0_12px_28px_rgba(15,61,62,0.14)]"
-              disabled={!studyRunId || analyzableConfusionCaptures.length === 0 || isAnalyzingConfusion}
-              onClick={analyzeConfusionCaptures}
-              type="button"
-            >
-              {isAnalyzingConfusion ? "Analyzing..." : "Analyze screenshots"}
-            </button>
-          </div>
-          {confusionStatus ? <div className="text-sm text-slate-600">{confusionStatus}</div> : null}
-          {currentConfusionAnalysis ? (
-            <div className="rounded-[1.5rem] bg-slate-950/5 p-4 text-sm text-slate-700">
-              <span className="font-medium text-slate-900">AI summary:</span>{" "}
-              {currentConfusionAnalysis.summary}
-            </div>
-          ) : null}
-          {currentConfusionCaptures.length === 0 ? (
-            <p className="text-sm text-slate-600">
-              No confusion screenshots are linked to the current run yet.
-            </p>
-          ) : (
-            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-              {currentConfusionCaptures.map((capture) => (
-                <div
-                  key={capture.id}
-                  className="overflow-hidden rounded-[1.5rem] border border-slate-200 bg-white/85"
-                >
-                  {capture.screenshotDataUrl ? (
-                    <Image
-                      alt={capture.title || "Confusion capture"}
-                      className="aspect-video w-full object-cover"
-                      height={360}
-                      src={capture.screenshotDataUrl}
-                      unoptimized
-                      width={640}
-                    />
-                  ) : (
-                    <div className="flex aspect-video items-center justify-center bg-slate-950/5 px-4 text-center text-sm text-slate-500">
-                      Preview omitted locally to stay within browser storage limits.
-                    </div>
-                  )}
-                  <div className="space-y-2 px-4 py-3 text-sm">
-                    <div className="font-medium text-slate-900">
-                      {capture.title || capture.domain || "Captured screen"}
-                    </div>
-                    <div className="text-slate-600">{new Date(capture.ts).toLocaleString()}</div>
-                    {currentCaptureInsights.get(capture.id) ? (
-                      <div className="rounded-2xl bg-slate-950/5 p-3 text-slate-700">
-                        <div className="font-medium text-slate-900">
-                          {currentCaptureInsights.get(capture.id)?.likelyTask}
-                        </div>
-                        <div className="mt-2">
-                          {currentCaptureInsights.get(capture.id)?.explanation}
-                        </div>
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
         </section>
       </div>
     </main>

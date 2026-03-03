@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo } from "react";
 
 import {
   AIVisualGallery,
@@ -11,80 +11,66 @@ import {
 import { ProfileRequired } from "@/components/profile-required";
 import {
   STORAGE_KEYS,
-  type AttentionReportRecord,
-  type ExtensionHistoryEntry,
-  type ExtensionSession,
-  type ProfileAnalysisRecord,
   type StudyRunRecord,
   type StudySetup,
-  type WebcamSession,
   calculateDailyStreak,
-  computeFusionMetrics,
-  countLookAwaySpikes,
-  createAttentionReportRecord,
   formatMinutesSeconds,
+  getGuardStyleLabel,
   getStoredJson,
-  isExtensionSessionLike,
-  isSampleAttentive,
   isStudyRunRecordLike,
   isStudySetupLike,
   pct,
-  resolveStudyRun,
   setStoredJson,
-  syncStudyRunToExtension,
   useCurrentProfile,
   useStoredJson,
 } from "@/lib/studyos";
+import {
+  type AttentionReportRecord,
+  type EventCorrelation,
+  type TopicHotspot,
+  type WebcamSession,
+  createAttentionReportRecord,
+  detectLateCrash,
+  isAttentionReportRecordLike,
+  isWebcamSessionLike,
+} from "@/lib/telemetry";
 
-const PATCHES: Record<string, { title: string; steps: string[] }> = {
-  "Seat-Leaver": {
-    title: "Micro-Patch: Chair Anchor Sprint (8 min)",
-    steps: [
-      "Before starting: water, charger, and notes within reach.",
-      "Stay seated for 8 minutes even if you feel restless.",
-      "Take a planned 60-second break after the sprint.",
-    ],
-  },
-  "Split Focus": {
-    title: "Micro-Patch: Two-Tab Lock (10 min)",
-    steps: [
-      "Keep only the lecture and one helper tab open.",
-      "If a third tab opens, close one immediately.",
-      "Use short planned resets instead of spontaneous tab hopping.",
-    ],
-  },
-  "Late Crasher": {
-    title: "Micro-Patch: Split-Run Protocol (6 + 6 min)",
-    steps: [
-      "Work for 6 focused minutes.",
-      "Take a 45-second reset for breathing and posture.",
-      "Work for another 6 focused minutes.",
-    ],
-  },
-  "Helper Reliant": {
-    title: "Micro-Patch: Helper Quota (8 min)",
-    steps: [
-      "Attempt the problem alone for one minute before asking for help.",
-      "Ask one precise question instead of a broad prompt.",
-      "Return to the source and apply the answer for 3 minutes.",
-    ],
-  },
-  "Deep Worker": {
-    title: "Micro-Patch: Streak Saver (60 sec)",
-    steps: [
-      "Write one line about what you just covered.",
-      "Write one line about what comes next.",
-      "Start another 8-minute sprint.",
-    ],
-  },
-};
+function downsampleSeries(
+  samples: WebcamSession["samples"],
+  mapValue: (sample: WebcamSession["samples"][number]) => number,
+  buckets = 24
+) {
+  if (!samples.length) return [];
 
-type GeneratedVisualBoard = {
-  createdAt: number;
-  summary: string;
-  cards: AIVisualCard[];
-  signature: string;
-};
+  const chunkSize = Math.max(1, Math.ceil(samples.length / buckets));
+  const points: Array<{ label: string; value: number }> = [];
+
+  for (let index = 0; index < samples.length; index += chunkSize) {
+    const chunk = samples.slice(index, index + chunkSize);
+    const ts = chunk[Math.floor(chunk.length / 2)]?.ts ?? chunk[0]?.ts ?? Date.now();
+    points.push({
+      label: new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      value: Math.round(
+        chunk.reduce((sum, sample) => sum + mapValue(sample), 0) / Math.max(chunk.length, 1)
+      ),
+    });
+  }
+
+  return points;
+}
+
+function getModeInterpretation(studyMode: StudySetup["studyMode"] | WebcamSession["studyMode"]) {
+  if (studyMode === "reading-notes") {
+    return "Reading mode tolerates more downward head angle and sometimes a lower blink rate, so Laminar.AI weighs continuity, posture drift, fatigue, and event-linked text hotspots more heavily than passive-stare cues.";
+  }
+  if (studyMode === "video-lecture") {
+    return "Video-lecture mode treats low blink rate plus drifting head pose as a stronger sign of zoning out, because the student can look present while mentally disengaging.";
+  }
+  if (studyMode === "active-recall-quiz") {
+    return "Active-recall mode accepts brow furrowing and short bursts of strain if the student stays visually anchored and keeps coming back to the task.";
+  }
+  return "Problem-solving mode expects some confusion and head movement while thinking, so Laminar.AI weighs repeated visibility breaks, phone distraction, and posture collapse more heavily than momentary struggle cues.";
+}
 
 export default function DashboardPage() {
   const currentProfile = useCurrentProfile();
@@ -98,344 +84,209 @@ export default function DashboardPage() {
     null,
     (value): value is StudyRunRecord | null => value === null || isStudyRunRecordLike(value)
   );
-  const webcamLast = useStoredJson<WebcamSession | null>(STORAGE_KEYS.attentionLast, null);
-  const webcamHistory = useStoredJson<WebcamSession[]>(STORAGE_KEYS.attentionHistory, [], Array.isArray);
-  const extensionLast = useStoredJson<ExtensionSession | null>(
-    STORAGE_KEYS.extensionLast,
+  const webcamLast = useStoredJson<WebcamSession | null>(
+    STORAGE_KEYS.attentionLast,
     null,
-    (value): value is ExtensionSession | null => value === null || isExtensionSessionLike(value)
+    (value): value is WebcamSession | null => value === null || isWebcamSessionLike(value)
   );
-  const extensionHistory = useStoredJson<ExtensionHistoryEntry[]>(
-    STORAGE_KEYS.extensionHistory,
+  const webcamHistory = useStoredJson<WebcamSession[]>(
+    STORAGE_KEYS.attentionHistory,
     [],
-    Array.isArray
+    (value): value is WebcamSession[] =>
+      Array.isArray(value) && value.every((entry) => isWebcamSessionLike(entry))
   );
   const reportHistory = useStoredJson<AttentionReportRecord[]>(
     STORAGE_KEYS.reportHistory,
     [],
-    Array.isArray
-  );
-  const aiProfileByRun = useStoredJson<Record<string, ProfileAnalysisRecord>>(
-    STORAGE_KEYS.aiProfileByRun,
-    {},
-    (value): value is Record<string, ProfileAnalysisRecord> =>
-      !!value && typeof value === "object" && !Array.isArray(value)
+    (value): value is AttentionReportRecord[] =>
+      Array.isArray(value) && value.every((entry) => isAttentionReportRecordLike(entry))
   );
 
-  const [showReport, setShowReport] = useState(false);
-  const [profileStatus, setProfileStatus] = useState("");
-  const [isGeneratingProfile, setIsGeneratingProfile] = useState(false);
-  const [visualStatus, setVisualStatus] = useState("");
-  const [isGeneratingVisuals, setIsGeneratingVisuals] = useState(false);
-  const [attentionVisuals, setAttentionVisuals] = useState<GeneratedVisualBoard | null>(null);
+  const currentRunId = currentRun?.studyRunId ?? null;
+  const webcam =
+    !currentRunId
+      ? (webcamLast ?? webcamHistory[0] ?? null)
+      : ((webcamLast?.studyRunId === currentRunId ? webcamLast : null) ??
+        webcamHistory.find((entry) => entry.studyRunId === currentRunId) ??
+        webcamLast ??
+        webcamHistory[0] ??
+        null);
 
-  useEffect(() => {
-    if (currentRun) {
-      syncStudyRunToExtension(currentRun);
-    }
-  }, [currentRun]);
+  const setup = webcam?.setupSnapshot ?? currentRun?.setupSnapshot ?? currentSetup;
 
-  const resolvedRun = useMemo(
-    () =>
-      resolveStudyRun({
-        currentRun,
-        currentSetup,
-        webcamLast,
-        webcamHistory,
-        extensionLast,
-        extensionHistory,
-      }),
-    [currentRun, currentSetup, extensionHistory, extensionLast, webcamHistory, webcamLast]
+  const reportRecord = useMemo(
+    () => (webcam ? createAttentionReportRecord({ setup, webcam }) : null),
+    [setup, webcam]
   );
-
-  const studyRunId = resolvedRun.studyRunId;
-  const webcam = resolvedRun.webcam;
-  const extensionSession = resolvedRun.extensionSession;
-  const setup = resolvedRun.setup;
-  const profileAnalysis = studyRunId ? aiProfileByRun[studyRunId] ?? null : null;
-
-  const metrics = useMemo(
-    () =>
-      computeFusionMetrics({
-        webcam,
-        extensionSession,
-        setup,
-      }),
-    [extensionSession, setup, webcam]
-  );
-
-  const reportRecord = useMemo(() => {
-    if (!webcam && !extensionSession) return null;
-    return createAttentionReportRecord({
-      setup,
-      webcam,
-      extensionSession,
-      metrics,
-    });
-  }, [extensionSession, metrics, setup, webcam]);
-
-  const reportSignature = reportRecord ? JSON.stringify(reportRecord) : "";
 
   useEffect(() => {
     if (!reportRecord) return;
 
-    const history = getStoredJson<AttentionReportRecord[]>(STORAGE_KEYS.reportHistory, []);
+    const history = getStoredJson<AttentionReportRecord[]>(
+      STORAGE_KEYS.reportHistory,
+      [],
+      (value): value is AttentionReportRecord[] =>
+        Array.isArray(value) && value.every((entry) => isAttentionReportRecordLike(entry))
+    );
     const existingIndex = history.findIndex((entry) => entry.id === reportRecord.id);
-
-    if (existingIndex >= 0 && JSON.stringify(history[existingIndex]) === reportSignature) {
-      return;
-    }
-
     const next = existingIndex >= 0 ? [...history] : [reportRecord, ...history];
+
     if (existingIndex >= 0) {
       next[existingIndex] = reportRecord;
     }
 
-    next.sort((a, b) => b.createdAt - a.createdAt);
+    next.sort((left, right) => right.createdAt - left.createdAt);
     setStoredJson(STORAGE_KEYS.reportHistory, next.slice(0, 90));
-  }, [reportRecord, reportSignature]);
+  }, [reportRecord]);
 
   const streak = calculateDailyStreak(reportHistory);
-  const recentHistory = webcamHistory.slice(0, 5);
-  const patch = PATCHES[metrics.fusionMode] ?? PATCHES["Deep Worker"];
-  const filteredReports = useMemo(
-    () =>
-      reportHistory
-        .slice()
-        .sort((a, b) => a.createdAt - b.createdAt)
-        .slice(-10),
+
+  const recentReports = useMemo(
+    () => reportHistory.slice().sort((left, right) => left.createdAt - right.createdAt).slice(-8),
     [reportHistory]
   );
-  const attentionVisualDatasets = useMemo<AIVisualDataset[]>(() => {
-    const datasets: AIVisualDataset[] = [];
 
-    if (filteredReports.length > 0) {
-      datasets.push({
-        id: "score_trend",
-        label: "Focus score trend",
-        accent: "#0f3d3e",
-        points: filteredReports.map((entry) => ({
-          label: new Date(entry.createdAt).toLocaleDateString(),
-          value: entry.score,
-        })),
-      });
+  const visualBoard = useMemo(() => {
+    if (!webcam || !reportRecord) return null;
 
-      datasets.push({
-        id: "attention_trend",
-        label: "Attention rate trend",
-        accent: "#c96f3b",
-        suffix: "%",
-        points: filteredReports.map((entry) => ({
-          label: new Date(entry.createdAt).toLocaleDateString(),
-          value: Math.round(entry.attentionRate * 100),
-        })),
-      });
-
-      datasets.push({
-        id: "duration_trend",
-        label: "Study duration trend",
-        accent: "#2563eb",
-        suffix: "m",
-        points: filteredReports.map((entry) => ({
-          label: new Date(entry.createdAt).toLocaleDateString(),
-          value: Math.round(entry.totalSeconds / 60),
-        })),
-      });
-
-      const modeCounts = new Map<string, number>();
-      for (const report of filteredReports) {
-        modeCounts.set(report.fusionMode, (modeCounts.get(report.fusionMode) ?? 0) + 1);
-      }
-
-      datasets.push({
-        id: "mode_mix",
-        label: "Fusion mode mix",
-        accent: "#0f3d3e",
-        points: [...modeCounts.entries()].map(([label, value], index) => ({
-          label,
-          value,
-          color: ["#0f3d3e", "#d17a44", "#4f7d75", "#1e3a8a", "#b45309", "#7c3aed"][index % 6],
-        })),
-      });
-
-      const switchPoints = filteredReports
-        .filter((entry) => entry.awaySwitches !== null)
-        .map((entry) => ({
-          label: new Date(entry.createdAt).toLocaleDateString(),
-          value: entry.awaySwitches ?? 0,
-        }));
-
-      if (switchPoints.length > 0) {
-        datasets.push({
-          id: "switch_trend",
-          label: "Off-focus switch trend",
-          accent: "#8b5cf6",
-          points: switchPoints,
-        });
-      }
-    }
-
-    if (metrics.timeByType) {
-      datasets.push({
-        id: "current_time_mix",
-        label: "Current run time mix",
-        accent: "#0f3d3e",
-        suffix: "m",
-        points: [
-          {
-            label: "Study",
-            value: metrics.timeByType.study.minutes,
-            color: "#0f3d3e",
-          },
-          {
-            label: "Helper",
-            value: metrics.timeByType.helper.minutes,
-            color: "#4f7d75",
-          },
-          {
-            label: "Sedative",
-            value: metrics.timeByType.sedative.minutes,
-            color: "#d17a44",
-          },
-          {
-            label: "Other",
-            value: metrics.timeByType.other.minutes,
-            color: "#94a3b8",
-          },
-        ],
-      });
-    }
-
-    return datasets.filter((dataset) => dataset.points.length > 0);
-  }, [filteredReports, metrics.timeByType]);
-  const attentionVisualSignature = JSON.stringify(
-    attentionVisualDatasets.map((dataset) => ({
-      id: dataset.id,
-      labels: dataset.points.map((point) => point.label),
-      values: dataset.points.map((point) => point.value),
-    }))
-  );
-  const attentionVisualsAreFresh = attentionVisuals?.signature === attentionVisualSignature;
-
-  useEffect(() => {
-    setAttentionVisuals((current) =>
-      current?.signature === attentionVisualSignature ? current : null
+    const attentionWave = downsampleSeries(webcam.samples, (sample) =>
+      sample.attentionLikely ? 100 : 0
     );
-  }, [attentionVisualSignature]);
+    const headDriftWave = downsampleSeries(webcam.samples, (sample) =>
+      Math.round(
+        Math.max(
+          Math.abs(sample.headPose.pitch),
+          Math.abs(sample.headPose.yaw),
+          Math.abs(sample.headPose.roll)
+        )
+      )
+    );
+    const cueMix = [
+      {
+        label: "PERCLOS",
+        value: Math.round(webcam.summary.perclos * 100),
+        color: "#0f3d3e",
+      },
+      {
+        label: "Brow Furrow",
+        value: Math.round(webcam.summary.browFurrowRate * 100),
+        color: "#d17a44",
+      },
+      {
+        label: "Jaw Clench",
+        value: Math.round(webcam.summary.jawClenchRate * 100),
+        color: "#b45309",
+      },
+      {
+        label: "Slouch",
+        value: Math.round(webcam.summary.postureBreakdown.slouchPct * 100),
+        color: "#1e3a8a",
+      },
+      {
+        label: "Phone",
+        value: Math.round(webcam.summary.phoneDetectionRate * 100),
+        color: "#b91c1c",
+      },
+    ];
+    const efficiencyTrend = recentReports.map((entry) => ({
+      label: new Date(entry.createdAt).toLocaleDateString(),
+      value: entry.score,
+    }));
 
-  async function generateStudentProfile() {
-    if (!studyRunId || (!webcam && !extensionSession)) return;
+    const datasets: AIVisualDataset[] = [
+      {
+        id: "attention_wave",
+        label: "Attention continuity",
+        accent: "#0f3d3e",
+        suffix: "%",
+        points: attentionWave,
+      },
+      {
+        id: "head_drift_wave",
+        label: "Head-pose drift",
+        accent: "#c96f3b",
+        suffix: " deg",
+        points: headDriftWave,
+      },
+      {
+        id: "cue_mix",
+        label: "Cue mix",
+        accent: "#4f7d75",
+        suffix: "%",
+        points: cueMix,
+      },
+      {
+        id: "efficiency_trend",
+        label: "Recent efficiency trend",
+        accent: "#1e3a8a",
+        points:
+          efficiencyTrend.length > 1
+            ? efficiencyTrend
+            : [{ label: "Current", value: reportRecord.score }],
+      },
+    ];
 
-    setIsGeneratingProfile(true);
-    setProfileStatus("Generating student profile...");
+    const cards: AIVisualCard[] = [
+      {
+        datasetId: "attention_wave",
+        title: "Session continuity",
+        subtitle: reportRecord.fusionMode,
+        chartType: "line",
+        insight: reportRecord.cognitiveStateSummary,
+        highlight: `${reportRecord.score}/100`,
+      },
+      {
+        datasetId: "head_drift_wave",
+        title: "Head-pose drift",
+        subtitle: `${webcam.summary.attentionFractureCount} attention fracture(s)`,
+        chartType: "line",
+        insight:
+          webcam.summary.attentionFractureCount > 0
+            ? "Repeated head-pose drift suggests fragmented visual anchoring rather than one stable study posture."
+            : "Head position stayed comparatively steady, so most inefficiency came from something other than physical drift.",
+        highlight: `${Math.round(webcam.summary.maxHeadDeviation.yaw)} deg max yaw`,
+      },
+      {
+        datasetId: "cue_mix",
+        title: "Cognitive cue mix",
+        subtitle: "Confusion, strain, posture, and device load",
+        chartType: "bar",
+        insight:
+          webcam.summary.browFurrowRate >= webcam.summary.jawClenchRate
+            ? "Confusion cues outweigh stress cues, which usually means the student stayed engaged but conceptually strained."
+            : "Stress cues are rising faster than confusion cues, which points to pressure or frustration rather than clean productive struggle.",
+        highlight: `${Math.round(webcam.summary.cognitiveLoadIndex * 100)} load`,
+      },
+      {
+        datasetId: "efficiency_trend",
+        title: "Recent efficiency trend",
+        subtitle: "How this run compares to recent sessions",
+        chartType: "line",
+        insight:
+          efficiencyTrend.length > 1
+            ? "The session score should be read against recent runs, not in isolation."
+            : "Run a few more sessions to turn Laminar.AI into a real trend tracker instead of a single snapshot.",
+        highlight: `${streak} day streak`,
+      },
+    ];
 
-    try {
-      const response = await fetch("/api/ai/profile", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          studyRunId,
-          setup,
-          webcam,
-          extensionSession,
-        }),
-      });
-      const payload = (await response.json()) as
-        | { profile?: ProfileAnalysisRecord; error?: string }
-        | undefined;
-
-      if (!response.ok || !payload?.profile) {
-        throw new Error(payload?.error || "Profile generation failed.");
-      }
-
-      setStoredJson(STORAGE_KEYS.aiProfileByRun, {
-        ...aiProfileByRun,
-        [studyRunId]: payload.profile,
-      });
-      setProfileStatus("Student profile saved.");
-    } catch (error) {
-      setProfileStatus(error instanceof Error ? error.message : "Profile generation failed.");
-    } finally {
-      setIsGeneratingProfile(false);
-    }
-  }
-
-  async function generateAttentionVisuals() {
-    if (attentionVisualDatasets.length < 2) return;
-
-    setIsGeneratingVisuals(true);
-    setVisualStatus("Designing an AI visual board...");
-
-    try {
-      const response = await fetch("/api/ai/visuals", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          scope: "attention",
-          controlsLabel: `Using the latest ${filteredReports.length} saved report(s).`,
-          pageContext: JSON.stringify({
-            currentFusionMode: metrics.fusionMode,
-            score: metrics.score,
-            attentionRatePct: Math.round(metrics.attention * 100),
-            lookAwaySpikes: metrics.lookAwaySpikes,
-            awaySwitches: metrics.awaySwitches,
-            patch: patch.title,
-            profileSummary: profileAnalysis?.summary ?? "",
-          }),
-          datasets: attentionVisualDatasets.map((dataset) => ({
-            id: dataset.id,
-            label: dataset.label,
-            defaultChartType:
-              dataset.id === "mode_mix" || dataset.id === "current_time_mix" ? "donut" : "line",
-            supportedChartTypes:
-              dataset.id === "mode_mix" || dataset.id === "current_time_mix"
-                ? ["donut", "bar"]
-                : ["line", "bar"],
-            note: dataset.label,
-            points: dataset.points.map((point) => ({
-              label: point.label,
-              value: point.value,
-            })),
-          })),
-        }),
-      });
-      const payload = (await response.json()) as
-        | { createdAt: number; summary: string; cards: AIVisualCard[]; error?: string }
-        | { error?: string }
-        | undefined;
-
-      if (!response.ok || !payload || !("cards" in payload)) {
-        throw new Error(payload?.error || "Visual generation failed.");
-      }
-
-      setAttentionVisuals({
-        createdAt: payload.createdAt,
-        summary: payload.summary,
-        cards: payload.cards,
-        signature: attentionVisualSignature,
-      });
-      setVisualStatus("AI visual board updated.");
-    } catch (error) {
-      setVisualStatus(error instanceof Error ? error.message : "Visual generation failed.");
-    } finally {
-      setIsGeneratingVisuals(false);
-    }
-  }
+    return {
+      summary: `Laminar.AI condensed the raw vision telemetry into ${reportRecord.fusionMode}. The student scored ${reportRecord.score}/100 with ${Math.round(reportRecord.attentionRate * 100)}% continuity, ${Math.round(reportRecord.perclos * 100)}% PERCLOS, and ${reportRecord.visibilityLossCount} visibility break(s). ${reportRecord.screenCorrelationSummary}`,
+      datasets,
+      cards,
+    };
+  }, [reportRecord, recentReports, streak, webcam]);
 
   if (!currentProfile) {
     return (
       <ProfileRequired
         title="Pick a profile before opening the attention dashboard."
-        description="Attention reports and streaks are now stored per person."
+        description="Attention diagnostics and streaks are stored per person."
       />
     );
   }
 
-  if (!webcam && !extensionSession) {
+  if (!webcam || !reportRecord) {
     return (
       <main className="min-h-screen p-6">
         <div className="mx-auto max-w-4xl space-y-6">
@@ -443,15 +294,15 @@ export default function DashboardPage() {
             <p className="eyebrow">Laminar.AI</p>
             <h1 className="section-title">Attention Dashboard</h1>
             <p className="section-copy">
-              No attention data yet. Save a study plan, run the webcam session, upload the
-              extension JSON, and return here to review the session.
+              No vision telemetry yet. Save a study plan, run the webcam session, and return here
+              to review the diagnostic.
             </p>
             <div className="flex flex-wrap gap-3">
               <Link className="button-primary shadow-[0_12px_28px_rgba(15,61,62,0.14)]" href="/focus">
-                New Session
+                New session
               </Link>
               <Link className="button-secondary" href="/academic">
-                Academic Dashboard
+                Academic dashboard
               </Link>
             </div>
           </div>
@@ -459,6 +310,11 @@ export default function DashboardPage() {
       </main>
     );
   }
+
+  const summary = webcam.summary;
+  const diagnostic = webcam.diagnosticReport;
+  const modeLabel = setup?.studyMode?.replace(/-/g, " ") ?? webcam.studyMode.replace(/-/g, " ");
+  const lateCrash = detectLateCrash(webcam.samples);
 
   return (
     <main className="min-h-screen p-6">
@@ -468,16 +324,16 @@ export default function DashboardPage() {
             <p className="eyebrow">Laminar.AI</p>
             <h1 className="section-title">Attention Dashboard</h1>
             <p className="section-copy">
-              This dashboard tracks the student&apos;s focus, study habits, and attention quality for
-              the current session.
+              The AI report below cleans the raw vision telemetry into one readable diagnostic for
+              this study mode, then grounds it with the screen-linked event traces underneath.
             </p>
           </div>
           <div className="flex flex-wrap gap-3">
             <Link className="button-secondary" href="/focus">
-              New Session
+              New session
             </Link>
             <Link className="button-secondary" href="/academic">
-              Academic Dashboard
+              Academic dashboard
             </Link>
             <Link className="button-secondary" href="/history">
               History
@@ -485,364 +341,187 @@ export default function DashboardPage() {
           </div>
         </header>
 
-        {!extensionSession ? (
-          <section className="panel flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-            <div>
-              <p className="eyebrow">Extension import needed</p>
-              <h2 className="text-xl font-semibold text-slate-950">Upload the JSON to finish this attention run</h2>
-              <p className="mt-2 text-sm text-slate-600">
-                The webcam session is already saved. Upload the extension JSON to unlock tab and
-                site-switching metrics for this run.
-              </p>
-            </div>
-            <Link className="button-primary shrink-0 shadow-[0_12px_28px_rgba(15,61,62,0.14)]" href="/import">
-              Upload JSON
-            </Link>
-          </section>
-        ) : null}
-
-        <section className="grid gap-4 lg:grid-cols-[1fr_1fr]">
-          <div className="panel space-y-4">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <p className="eyebrow">Attention report</p>
-                <h2 className="text-xl font-semibold text-slate-950">Readable session summary</h2>
-              </div>
-              <button
-                className="button-primary shadow-[0_12px_28px_rgba(15,61,62,0.14)]"
-                onClick={() => setShowReport((value) => !value)}
-                type="button"
-              >
-                {showReport ? "Hide report" : "Generate report"}
-              </button>
-            </div>
-            {showReport && reportRecord ? (
-              <div className="rounded-[1.5rem] bg-slate-950/5 p-4 text-sm leading-7 text-slate-700">
-                {reportRecord.reportText}
-              </div>
-            ) : (
-              <p className="text-sm text-slate-600">
-                Generate a readable report that summarizes webcam attention, tab behavior, and the
-                current study setup.
-              </p>
-            )}
+        <section className="panel space-y-4">
+          <div>
+            <p className="eyebrow">Session context</p>
+            <h2 className="text-2xl font-semibold text-slate-950">
+              {setup?.studentName ?? "Student"} / {setup?.moduleName ?? "Study session"}
+            </h2>
+            <p className="mt-2 text-sm text-slate-700">{setup?.topic ?? "Unspecified topic"}</p>
           </div>
-
-          <div className="panel space-y-4">
-            <div>
-              <p className="eyebrow">Recent webcam runs</p>
-              <h2 className="text-xl font-semibold text-slate-950">Last 5 sessions</h2>
-            </div>
-            {recentHistory.length === 0 ? (
-              <p className="text-sm text-slate-600">No webcam history yet.</p>
-            ) : (
-              <div className="space-y-2">
-                {recentHistory.map((entry, index) => {
-                  const historySamples = entry.samples ?? [];
-                  const historyAttention = historySamples.length
-                    ? historySamples.filter(isSampleAttentive).length / historySamples.length
-                    : 0;
-                  const historySpikes = historySamples.length
-                    ? countLookAwaySpikes(historySamples, 2000)
-                    : 0;
-
-                  return (
-                    <div
-                      key={`${entry.sessionId}-${index}`}
-                      className="flex flex-col gap-2 rounded-2xl border border-slate-200 px-4 py-3 md:flex-row md:items-center md:justify-between"
-                    >
-                      <div className="text-sm">
-                        <div className="font-medium text-slate-900">
-                          {entry.setupSnapshot?.topic || "Study session"}
-                        </div>
-                        <div className="text-slate-600">{formatMinutesSeconds(entry.totalSeconds)}</div>
-                      </div>
-                      <div className="text-sm md:text-right">
-                        <div className="font-medium text-slate-900">{pct(historyAttention)}</div>
-                        <div className="text-slate-600">{historySpikes} spikes</div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
+          <div className="grid gap-3 text-sm text-slate-700 sm:grid-cols-2 lg:grid-cols-4">
+            <ContextPill label="Study mode" value={modeLabel} />
+            <ContextPill label="Duration" value={formatMinutesSeconds(webcam.totalSeconds)} />
+            <ContextPill label="Study source" value={setup?.focusDomain || "Not specified"} />
+            <ContextPill label="Guard style" value={getGuardStyleLabel(setup?.guardStyle ?? "noob")} />
           </div>
-        </section>
-
-        {setup ? (
-          <section className="grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
-            <div className="panel space-y-3">
-              <p className="eyebrow">Student plan</p>
-              <h2 className="text-2xl font-semibold text-slate-950">
-                {setup.studentName} · {setup.moduleName}
-              </h2>
-              <p className="text-sm text-slate-700">{setup.topic}</p>
-              <div className="grid gap-3 text-sm text-slate-700 sm:grid-cols-2">
-                <GoalPill label="Target timer" value={`${setup.targetMinutes} min`} />
-                <GoalPill label="Focus domain" value={setup.focusDomain || "Any study site"} />
-                <GoalPill label="Max tab exits" value={String(setup.maxTabSwitches)} />
-                <GoalPill label="Max look-away spikes" value={String(setup.maxLookAwaySpikes)} />
-              </div>
-            </div>
-
-            <div className="panel space-y-3">
-              <p className="eyebrow">Badge track</p>
-              <div className="text-4xl font-semibold text-slate-950">{streak}</div>
-              <div className="text-sm text-slate-600">consecutive successful day(s)</div>
-              <div
-                className={`rounded-2xl px-4 py-3 text-sm ${
-                  metrics.goalEvaluation?.achieved
-                    ? "bg-emerald-50 text-emerald-900"
-                    : "bg-slate-950/5 text-slate-700"
-                }`}
-              >
-                {metrics.goalEvaluation?.achieved
-                  ? `${metrics.goalEvaluation.badgeLabel} earned for today.`
-                  : "Complete all current goals to extend the streak."}
-              </div>
-            </div>
-          </section>
-        ) : null}
-
-        <section className="grid gap-4 md:grid-cols-4">
-          <MetricCard label="Focus Score" value={String(metrics.score)} hint="out of 100" />
-          <MetricCard
-            label="Webcam Attention"
-            value={metrics.samples.length ? pct(metrics.attention) : "-"}
-            hint={
-              metrics.samples.length
-                ? `${metrics.lookAwaySpikes} look-away spikes${metrics.lateCrash ? " | late crash" : ""}`
-                : "Run a webcam session"
-            }
-          />
-          <MetricCard
-            label="Off-focus switches"
-            value={metrics.awaySwitches !== null ? String(metrics.awaySwitches) : "-"}
-            hint={
-              setup?.focusDomain
-                ? `times switched away from ${setup.focusDomain}`
-                : "Import extension data to count tab exits"
-            }
-          />
-          <MetricCard
-            label="Confusion captures"
-            value={String(metrics.confusionCaptures.length)}
-            hint="captured for the academic dashboard"
-          />
-        </section>
-
-        <section className="grid gap-4 lg:grid-cols-[1.15fr_0.85fr]">
-          <div className="panel space-y-4">
-            <div>
-              <p className="eyebrow">Goal status</p>
-              <h2 className="text-2xl font-semibold text-slate-950">Did the student hit the plan?</h2>
-            </div>
-            <div className="grid gap-3 sm:grid-cols-3">
-              <GoalStatusCard
-                label="Timer"
-                met={metrics.goalEvaluation?.durationMet ?? false}
-                pending={false}
-                detail={`${formatMinutesSeconds(metrics.totalSeconds)} logged`}
-              />
-              <GoalStatusCard
-                label="Face guard"
-                met={metrics.goalEvaluation?.faceMet ?? false}
-                pending={false}
-                detail={`${metrics.lookAwaySpikes} spikes detected`}
-              />
-              <GoalStatusCard
-                label="Tab guard"
-                met={metrics.goalEvaluation?.tabMet ?? false}
-                pending={metrics.goalEvaluation?.pendingTabData ?? true}
-                detail={
-                  metrics.goalEvaluation?.pendingTabData
-                    ? "waiting for extension import"
-                    : `${metrics.awaySwitches ?? 0} exits from lecture site`
-                }
-              />
-            </div>
-            <div className="rounded-2xl border border-slate-200 bg-white/70 px-4 py-4">
-              <div className="text-sm font-semibold text-slate-900">{metrics.fusionMode}</div>
-              <div className="mt-1 text-sm text-slate-600">
-                {metrics.tabSpans.length
-                  ? `Switch rate: ${metrics.switchRate.toFixed(1)} per 10 minutes`
-                  : "Import extension JSON to enable screen behavior signals."}
-              </div>
-              <div className="mt-3 text-sm text-slate-700">
-                {metrics.goalEvaluation?.achieved
-                  ? "All configured goals were met. Badge awarded."
-                  : "The session is still recorded even when guards are missed, so the student can review the pattern honestly."}
-              </div>
-            </div>
-          </div>
-
-          <div className="panel space-y-3">
-            <p className="eyebrow">Action</p>
-            <h2 className="text-xl font-semibold text-slate-950">{patch.title}</h2>
-            <ol className="list-decimal space-y-2 pl-5 text-sm text-slate-700">
-              {patch.steps.map((step) => (
-                <li key={step}>{step}</li>
-              ))}
-            </ol>
+          <div
+            className={`rounded-2xl px-4 py-3 text-sm ${
+              reportRecord.goalAchieved
+                ? "bg-emerald-50 text-emerald-900"
+                : "bg-slate-950/5 text-slate-700"
+            }`}
+          >
+            {reportRecord.goalAchieved
+              ? `${reportRecord.badgeLabel} earned for this session.`
+              : "The session crossed one or more guard thresholds, so Laminar.AI logged it as noisy diagnostic evidence rather than a clean run."}
           </div>
         </section>
 
         <section className="panel space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
-              <p className="eyebrow">AI profile</p>
-              <h2 className="text-xl font-semibold text-slate-950">Blended attention pattern</h2>
+              <p className="eyebrow">AI Diagnostic</p>
+              <h2 className="text-3xl font-semibold text-slate-950">
+                {diagnostic?.primary_behavior_label ?? reportRecord.fusionMode}
+              </h2>
+              <p className="mt-2 max-w-4xl text-sm leading-7 text-slate-700">
+                {diagnostic?.cognitive_state_summary ?? reportRecord.cognitiveStateSummary}
+              </p>
             </div>
-            <button
-              className="button-secondary"
-              disabled={!studyRunId || (!webcam && !extensionSession) || isGeneratingProfile}
-              onClick={generateStudentProfile}
-              type="button"
-            >
-              {isGeneratingProfile ? "Generating..." : "Generate profile"}
-            </button>
+            <div className="rounded-[1.5rem] bg-[#0f3d3e] px-5 py-4 text-center text-white shadow-[0_16px_38px_rgba(15,61,62,0.18)]">
+              <div className="text-xs uppercase tracking-[0.18em] text-white/70">Efficiency</div>
+              <div className="mt-2 text-5xl font-semibold">{reportRecord.score}</div>
+            </div>
           </div>
-          {profileStatus ? <div className="text-sm text-slate-600">{profileStatus}</div> : null}
-          {profileAnalysis ? (
-            <div className="space-y-3 rounded-[1.5rem] bg-slate-950/5 p-4 text-sm text-slate-700">
-              <div className="text-base font-semibold text-slate-900">
-                {profileAnalysis.profileLabel}
+
+          <div className="rounded-[1.5rem] border border-slate-200 bg-white/75 px-5 py-4 text-sm leading-7 text-slate-700">
+            {reportRecord.reportText}
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2">
+            {reportRecord.optimizationTips.map((tip) => (
+              <div
+                key={tip}
+                className="rounded-[1.35rem] border border-slate-200 bg-white/80 px-4 py-4 text-sm text-slate-700"
+              >
+                {tip}
               </div>
-              <p>{profileAnalysis.summary}</p>
-              <p>
-                <span className="font-medium text-slate-900">Attention:</span>{" "}
-                {profileAnalysis.attentionPattern}
-              </p>
-              <p>
-                <span className="font-medium text-slate-900">Behavior:</span>{" "}
-                {profileAnalysis.behaviorPattern}
-              </p>
-              <p>
-                <span className="font-medium text-slate-900">Strengths:</span>{" "}
-                {profileAnalysis.strengths.join(", ")}
-              </p>
-              <p>
-                <span className="font-medium text-slate-900">Risks:</span>{" "}
-                {profileAnalysis.risks.join(", ")}
-              </p>
-              <p>
-                <span className="font-medium text-slate-900">Next experiment:</span>{" "}
-                {profileAnalysis.nextExperiment}
-              </p>
+            ))}
+          </div>
+
+          <div className="rounded-[1.5rem] border border-slate-200 bg-[#0f3d3e]/6 px-5 py-4">
+            <div className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-500">
+              Screen Correlation
             </div>
-          ) : (
-            <p className="text-sm text-slate-600">
-              Generate a server-side profile that blends webcam attention with tab and helper
-              behavior for this session.
+            <p className="mt-3 text-sm leading-7 text-slate-700">
+              {reportRecord.screenCorrelationSummary}
             </p>
-          )}
+            {reportRecord.topicHotspots.length > 0 ? (
+              <div className="mt-4 grid gap-3 md:grid-cols-2">
+                {reportRecord.topicHotspots.map((hotspot: TopicHotspot) => (
+                  <div
+                    key={`${hotspot.label}-${hotspot.explanation}`}
+                    className="rounded-[1.25rem] border border-slate-200 bg-white/85 px-4 py-4 text-sm text-slate-700"
+                  >
+                    <div className="font-semibold text-slate-900">{hotspot.label}</div>
+                    <div className="mt-2 leading-7">{hotspot.explanation}</div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
         </section>
 
-        {metrics.timeByType ? (
-          <section className="grid gap-4 md:grid-cols-4">
-            <TimeCard
-              label="Study time"
-              minutes={metrics.timeByType.study.minutes}
-              seconds={metrics.timeByType.study.seconds}
-            />
-            <TimeCard
-              label="Helper time"
-              minutes={metrics.timeByType.helper.minutes}
-              seconds={metrics.timeByType.helper.seconds}
-            />
-            <TimeCard
-              label="Sedative time"
-              minutes={metrics.timeByType.sedative.minutes}
-              seconds={metrics.timeByType.sedative.seconds}
-            />
-            <TimeCard
-              label="Other time"
-              minutes={metrics.timeByType.other.minutes}
-              seconds={metrics.timeByType.other.seconds}
-            />
-          </section>
-        ) : null}
+        <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
+          <MetricCard
+            label="Attention continuity"
+            value={pct(reportRecord.attentionRate)}
+            hint={`${reportRecord.lookAwaySpikes} spikes`}
+          />
+          <MetricCard label="PERCLOS" value={pct(reportRecord.perclos)} hint="fatigue marker" />
+          <MetricCard
+            label="Blink rate"
+            value={`${reportRecord.blinkRatePerMinute}`}
+            hint="per minute"
+          />
+          <MetricCard
+            label="Attention fractures"
+            value={String(reportRecord.attentionFractureCount)}
+            hint="head-pose drift clusters"
+          />
+          <MetricCard
+            label="Phone presence"
+            value={pct(reportRecord.phoneDetectionRate)}
+            hint={`${reportRecord.phoneDetectionEvents} phone samples`}
+          />
+          <MetricCard
+            label="Visibility breaks"
+            value={String(reportRecord.visibilityLossCount)}
+            hint={`${Math.round(reportRecord.hiddenSeconds)} sec hidden`}
+          />
+          <MetricCard
+            label="Slouch rate"
+            value={pct(reportRecord.slouchRate)}
+            hint={lateCrash ? "late-session drift detected" : "posture load"}
+          />
+        </section>
 
-        {metrics.topDomains ? (
-          <section className="panel space-y-4">
+        <section className="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
+          <div className="panel space-y-4">
             <div>
-              <p className="eyebrow">Domains</p>
-              <h2 className="text-xl font-semibold text-slate-950">Top tracked domains</h2>
+              <p className="eyebrow">Mode-weighted interpretation</p>
+              <h2 className="text-2xl font-semibold text-slate-950">What mattered in this study mode?</h2>
             </div>
-            <div className="space-y-2">
-              {metrics.topDomains.top.map((entry) => (
-                <div
-                  key={entry.domain}
-                  className="flex items-center justify-between rounded-2xl border border-slate-200 px-4 py-3"
-                >
-                  <span className="font-medium text-slate-900">{entry.domain}</span>
-                  <span className="text-sm text-slate-600">
-                    {entry.minutes} min {entry.seconds} sec
-                  </span>
-                </div>
-              ))}
+            <div className="rounded-2xl border border-slate-200 bg-white/80 px-4 py-4 text-sm leading-7 text-slate-700">
+              {getModeInterpretation(webcam.studyMode)}
             </div>
-          </section>
-        ) : null}
-
-        <section className="panel space-y-5">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-            <div>
-              <p className="eyebrow">AI Visual Board</p>
-              <h2 className="text-xl font-semibold text-slate-950">Native analytics inside Laminar.AI</h2>
-              <p className="mt-2 max-w-2xl text-sm text-slate-600">
-                AI chooses the best chart board from your saved attention history. The visuals stay
-                inside the app and use a fixed recent-session window.
-              </p>
-            </div>
-            <button
-              className="button-primary shadow-[0_12px_28px_rgba(15,61,62,0.14)]"
-              disabled={attentionVisualDatasets.length < 2 || isGeneratingVisuals}
-              onClick={generateAttentionVisuals}
-              type="button"
-            >
-              {isGeneratingVisuals
-                ? "Designing..."
-                : attentionVisualsAreFresh
-                  ? "Refresh visual board"
-                  : "Generate visual board"}
-            </button>
           </div>
 
-          <div className="grid gap-4 lg:grid-cols-[320px_1fr]">
-            <div className="rounded-[1.6rem] border border-slate-200 bg-white/78 px-5 py-5">
-              <div className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-500">
-                Visual Source
-              </div>
-              <div className="mt-3 text-4xl font-semibold text-slate-950">{filteredReports.length}</div>
-              <div className="mt-1 text-sm text-slate-600">recent saved report(s) feeding the AI visuals</div>
-              <div className="mt-5 rounded-[1.25rem] bg-slate-950/5 px-4 py-4 text-sm text-slate-700">
-                Current mode: <span className="font-semibold text-slate-950">{metrics.fusionMode}</span>
-              </div>
+          <div className="panel space-y-4">
+            <div>
+              <p className="eyebrow">Streak</p>
+              <h2 className="text-2xl font-semibold text-slate-950">{streak} successful day(s)</h2>
             </div>
-
-            <div className="rounded-[1.6rem] border border-slate-200 bg-white/78 px-5 py-5">
-              {visualStatus ? <div className="mb-4 text-sm text-slate-600">{visualStatus}</div> : null}
-              {!attentionVisualsAreFresh || !attentionVisuals ? (
-                <p className="text-sm leading-7 text-slate-600">
-                  Generate the visual board to let AI decide which attention charts matter most for
-                  this student right now. It will use the recent saved-session window and the saved local
-                  telemetry already in Laminar.AI.
-                </p>
-              ) : (
-                <AIVisualGallery
-                  cards={attentionVisuals.cards}
-                  datasets={attentionVisualDatasets}
-                  summary={attentionVisuals.summary}
-                />
-              )}
+            <div className="rounded-[1.5rem] border border-slate-200 bg-white/75 px-4 py-4 text-sm text-slate-700">
+              Clean runs in casual and lock-in mode keep the streak moving. Noob mode is mainly for passive logging and baseline evidence.
+            </div>
+            <div className="rounded-[1.5rem] bg-slate-950/5 px-4 py-4 text-sm text-slate-700">
+              Brow furrowing: {pct(summary.browFurrowRate)} / Jaw clenching: {pct(summary.jawClenchRate)} / Upright posture: {pct(summary.postureBreakdown.uprightPct)}
             </div>
           </div>
         </section>
+
+        {visualBoard ? (
+          <section className="panel space-y-5">
+            <div>
+              <p className="eyebrow">Telemetry Visuals</p>
+              <h2 className="text-xl font-semibold text-slate-950">
+                The cleaned report grounded by the raw session traces
+              </h2>
+            </div>
+            {reportRecord.eventCorrelations.length > 0 ? (
+              <div className="grid gap-3 lg:grid-cols-2">
+                {reportRecord.eventCorrelations.map((correlation: EventCorrelation) => (
+                  <div
+                    key={`visual-${correlation.event_label}-${correlation.visible_on_screen}-${correlation.visible_text_quote}`}
+                    className="rounded-[1.5rem] border border-slate-200 bg-white/78 px-4 py-4 text-sm text-slate-700"
+                  >
+                    <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">
+                      {correlation.event_label}
+                    </div>
+                    <div className="mt-2 text-lg font-semibold text-slate-950">
+                      {correlation.visible_on_screen}
+                    </div>
+                    <div className="mt-3 rounded-xl bg-slate-950/5 px-3 py-2 text-sm font-medium text-slate-800">
+                      Visible text: {correlation.visible_text_quote || "No exact text recovered"}
+                    </div>
+                    <p className="mt-3 leading-7">{correlation.interpretation}</p>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            <AIVisualGallery
+              cards={visualBoard.cards}
+              datasets={visualBoard.datasets}
+              summary={visualBoard.summary}
+            />
+          </section>
+        ) : null}
 
         <footer className="px-1 text-xs text-slate-500">
-          Privacy: webcam video is never uploaded or stored. The extension stores only domains,
-          timestamps, and confusion screenshots that the student explicitly captures.
+          Privacy: Laminar.AI stores only lightweight landmark-derived telemetry on this device.
+          Webcam video is never uploaded or saved.
         </footer>
       </div>
     </main>
@@ -867,57 +546,11 @@ function MetricCard({
   );
 }
 
-function TimeCard({
-  label,
-  minutes,
-  seconds,
-}: {
-  label: string;
-  minutes: number;
-  seconds: number;
-}) {
-  return (
-    <div className="panel space-y-2">
-      <p className="text-sm font-medium text-slate-600">{label}</p>
-      <div className="text-3xl font-semibold text-slate-950">{minutes} min</div>
-      <p className="text-sm text-slate-500">{seconds} sec</p>
-    </div>
-  );
-}
-
-function GoalPill({ label, value }: { label: string; value: string }) {
+function ContextPill({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-2xl border border-slate-200 px-4 py-3">
       <div className="text-xs uppercase tracking-[0.18em] text-slate-500">{label}</div>
       <div className="mt-1 font-medium text-slate-900">{value}</div>
-    </div>
-  );
-}
-
-function GoalStatusCard({
-  label,
-  met,
-  pending,
-  detail,
-}: {
-  label: string;
-  met: boolean;
-  pending: boolean;
-  detail: string;
-}) {
-  const tone = pending
-    ? "bg-amber-50 text-amber-900 border-amber-200"
-    : met
-      ? "bg-emerald-50 text-emerald-900 border-emerald-200"
-      : "bg-rose-50 text-rose-900 border-rose-200";
-
-  return (
-    <div className={`rounded-[1.5rem] border px-4 py-4 ${tone}`}>
-      <div className="text-sm font-semibold">{label}</div>
-      <div className="mt-1 text-xl font-semibold">
-        {pending ? "Pending" : met ? "Met" : "Missed"}
-      </div>
-      <div className="mt-2 text-sm opacity-80">{detail}</div>
     </div>
   );
 }

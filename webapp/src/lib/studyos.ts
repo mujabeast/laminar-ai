@@ -26,7 +26,12 @@ const PROFILE_STORAGE_PREFIX = "studyos_profile";
 const GLOBAL_STORAGE_KEYS = new Set<string>(Object.values(PROFILE_STORAGE_KEYS));
 const storageSnapshotCache = new Map<string, { raw: string | null; value: unknown }>();
 
-export type StudyGuardStyle = "noob" | "lock-in";
+export type StudyGuardStyle = "noob" | "casual" | "lock-in";
+export type StudyMode =
+  | "video-lecture"
+  | "reading-notes"
+  | "active-recall-quiz"
+  | "problem-solving";
 
 export type UserProfile = {
   id: string;
@@ -40,12 +45,26 @@ export type StudySetup = {
   studentName: string;
   moduleName: string;
   topic: string;
+  studyMode: StudyMode;
   focusDomain: string;
-  targetMinutes: number;
-  maxTabSwitches: number;
-  maxLookAwaySpikes: number;
+  targetMinutes?: number;
+  maxTabSwitches?: number;
+  maxLookAwaySpikes?: number;
   guardStyle: StudyGuardStyle;
   createdAt: number;
+};
+
+export type GuardThresholdProfile = {
+  label: string;
+  phoneEvents: number;
+  visibilityLossCount: number;
+  lookAwaySpikes: number;
+  slouchRate: number;
+  jawClenchRate: number;
+  browFurrowRate: number;
+  perclos: number;
+  maxYaw: number;
+  minSessionSecondsForSuccess: number;
 };
 
 export type StudyRunRecord = {
@@ -563,6 +582,7 @@ export function isStudySetupLike(value: unknown): value is StudySetup {
     typeof candidate.studentName === "string" &&
     typeof candidate.moduleName === "string" &&
     typeof candidate.topic === "string" &&
+    typeof candidate.studyMode === "string" &&
     typeof candidate.focusDomain === "string"
   );
 }
@@ -751,7 +771,6 @@ export function getStoredStudyRun() {
 export function startFreshStudyRun(setup: StudySetup | null) {
   const run = createStudyRunRecord(setup);
   setStoredJson(STORAGE_KEYS.studyRunCurrent, run);
-  syncStudyRunToExtension(run);
   return run;
 }
 
@@ -782,25 +801,11 @@ export function upsertCurrentStudyRun(args: {
   };
 
   setStoredJson(STORAGE_KEYS.studyRunCurrent, next);
-  syncStudyRunToExtension(next);
   return next;
 }
 
 export function syncStudyRunToExtension(run: StudyRunRecord | null) {
-  if (typeof window === "undefined" || !run) return;
-
-  window.postMessage(
-    {
-      source: "studyos-webapp",
-      type: "STUDYOS_SYNC_RUN",
-      payload: {
-        studyRunId: run.studyRunId,
-        setupSnapshot: run.setupSnapshot,
-        syncedAt: Date.now(),
-      },
-    },
-    window.location.origin
-  );
+  void run;
 }
 
 export function pct(value: number) {
@@ -833,20 +838,82 @@ export function hashString(value: string) {
 }
 
 export function normalizeFocusDomain(input: string) {
-  const trimmed = input.trim().toLowerCase();
+  const trimmed = input.trim();
   if (!trimmed) return "";
 
   try {
-    const withProtocol = trimmed.startsWith("http") ? trimmed : `https://${trimmed}`;
+    const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
     return new URL(withProtocol).hostname.replace(/^www\./, "");
   } catch {
-    return trimmed.replace(/^www\./, "").replace(/\/.*$/, "");
+    return trimmed;
   }
 }
 
 export function normalizeGuardStyle(input: string | null | undefined): StudyGuardStyle {
   if (input === "lock-in" || input === "strict") return "lock-in";
+  if (input === "casual") return "casual";
   return "noob";
+}
+
+export function getGuardStyleLabel(guardStyle: StudyGuardStyle) {
+  const normalized = normalizeGuardStyle(guardStyle);
+  if (normalized === "lock-in") return "Lock in mode";
+  if (normalized === "casual") return "Casual mode";
+  return "Noob mode";
+}
+
+export function getGuardThresholdProfile(guardStyle: StudyGuardStyle): GuardThresholdProfile {
+  const normalized = normalizeGuardStyle(guardStyle);
+
+  if (normalized === "lock-in") {
+    return {
+      label: "Lock in mode",
+      phoneEvents: 1,
+      visibilityLossCount: 1,
+      lookAwaySpikes: 1,
+      slouchRate: 0.18,
+      jawClenchRate: 0.18,
+      browFurrowRate: 0.18,
+      perclos: 0.2,
+      maxYaw: 14,
+      minSessionSecondsForSuccess: 90,
+    };
+  }
+
+  if (normalized === "casual") {
+    return {
+      label: "Casual mode",
+      phoneEvents: 2,
+      visibilityLossCount: 2,
+      lookAwaySpikes: 2,
+      slouchRate: 0.32,
+      jawClenchRate: 0.28,
+      browFurrowRate: 0.28,
+      perclos: 0.28,
+      maxYaw: 22,
+      minSessionSecondsForSuccess: 90,
+    };
+  }
+
+  return {
+    label: "Noob mode",
+    phoneEvents: Number.POSITIVE_INFINITY,
+    visibilityLossCount: Number.POSITIVE_INFINITY,
+    lookAwaySpikes: Number.POSITIVE_INFINITY,
+    slouchRate: Number.POSITIVE_INFINITY,
+    jawClenchRate: Number.POSITIVE_INFINITY,
+    browFurrowRate: Number.POSITIVE_INFINITY,
+    perclos: Number.POSITIVE_INFINITY,
+    maxYaw: Number.POSITIVE_INFINITY,
+    minSessionSecondsForSuccess: 60,
+  };
+}
+
+export function normalizeStudyMode(input: string | null | undefined): StudyMode {
+  if (input === "reading-notes") return "reading-notes";
+  if (input === "active-recall-quiz") return "active-recall-quiz";
+  if (input === "problem-solving") return "problem-solving";
+  return "video-lecture";
 }
 
 export function isSampleAttentive(sample: Sample) {
@@ -1054,7 +1121,10 @@ export function countAwaySwitchActivations(
 }
 
 export function getBadgeLabel(guardStyle: StudyGuardStyle) {
-  return normalizeGuardStyle(guardStyle) === "lock-in" ? "Lock-In Legend" : "Momentum Builder";
+  const normalized = normalizeGuardStyle(guardStyle);
+  if (normalized === "lock-in") return "Lock-In Legend";
+  if (normalized === "casual") return "Steady Runner";
+  return "Baseline Logged";
 }
 
 export function evaluateGoals(
@@ -1068,13 +1138,12 @@ export function evaluateGoals(
 ): GoalEvaluation | null {
   if (!setup) return null;
 
-  const durationMet = metrics.totalSeconds >= setup.targetMinutes * 60;
-  const faceMet = metrics.lookAwaySpikes <= setup.maxLookAwaySpikes;
-  const pendingTabData = !metrics.hasTabData;
-  const tabMet = pendingTabData || metrics.awaySwitches === null
-    ? null
-    : metrics.awaySwitches <= setup.maxTabSwitches;
-  const achieved = durationMet && faceMet && (tabMet ?? false);
+  const thresholds = getGuardThresholdProfile(setup.guardStyle);
+  const durationMet = metrics.totalSeconds >= thresholds.minSessionSecondsForSuccess;
+  const faceMet = metrics.lookAwaySpikes <= thresholds.lookAwaySpikes;
+  const pendingTabData = false;
+  const tabMet = true;
+  const achieved = durationMet && faceMet;
 
   return {
     durationMet,
@@ -1082,9 +1151,8 @@ export function evaluateGoals(
     tabMet,
     pendingTabData,
     achieved,
-    remainingFaceMisses: Math.max(0, setup.maxLookAwaySpikes - metrics.lookAwaySpikes),
-    remainingTabSwitches:
-      metrics.awaySwitches === null ? null : Math.max(0, setup.maxTabSwitches - metrics.awaySwitches),
+    remainingFaceMisses: Math.max(0, thresholds.lookAwaySpikes - metrics.lookAwaySpikes),
+    remainingTabSwitches: setup.maxTabSwitches ?? 0,
     badgeLabel: achieved ? getBadgeLabel(setup.guardStyle) : null,
   };
 }
@@ -1101,7 +1169,7 @@ export function buildAttentionReportText(args: {
       `${setup.studentName} studied ${setup.moduleName} (${setup.topic}) for ${formatMinutesSeconds(metrics.totalSeconds)}.`
     );
     lines.push(
-      `The configured goals were ${setup.maxLookAwaySpikes} look-away spikes, ${setup.maxTabSwitches} tab exits from ${setup.focusDomain || "the main study context"}, and a ${setup.targetMinutes}-minute session.`
+      `The guard style was ${getGuardStyleLabel(setup.guardStyle)}, so Laminar.AI judged the session against that mode's sensitivity thresholds.`
     );
   }
 
@@ -1109,19 +1177,7 @@ export function buildAttentionReportText(args: {
     `Observed attention was ${pct(metrics.attention)} with ${metrics.lookAwaySpikes} look-away spikes and a focus score of ${metrics.score}.`
   );
 
-  if (metrics.awaySwitches !== null) {
-    lines.push(`The student left the focus site ${metrics.awaySwitches} times.`);
-  } else {
-    lines.push("Tab guard evaluation is pending because no extension session has been imported yet.");
-  }
-
   lines.push(`Current study pattern is classified as ${metrics.fusionMode}.`);
-
-  if (metrics.confusionCaptures.length > 0) {
-    lines.push(
-      `${metrics.confusionCaptures.length} confusion capture${metrics.confusionCaptures.length === 1 ? "" : "s"} were saved for later review.`
-    );
-  }
 
   if (metrics.goalEvaluation?.achieved) {
     lines.push(
@@ -1131,8 +1187,6 @@ export function buildAttentionReportText(args: {
     const misses = [
       !metrics.goalEvaluation.durationMet ? "session duration target" : null,
       !metrics.goalEvaluation.faceMet ? "look-away guard" : null,
-      metrics.goalEvaluation.tabMet === false ? "tab-switch guard" : null,
-      metrics.goalEvaluation.pendingTabData ? "tab-switch data is still pending import" : null,
     ].filter(Boolean);
 
     if (misses.length) {
@@ -1148,55 +1202,43 @@ export function computeFusionMetrics(args: {
   extensionSession: ExtensionSession | null;
   setup: StudySetup | null;
 }) {
-  const { webcam, extensionSession, setup } = args;
+  const { webcam, setup } = args;
 
   const samples: Sample[] = webcam?.samples ?? [];
   const totalSeconds = Number(webcam?.totalSeconds ?? 0);
-  const tabSpans = extensionSession?.tabSpans ?? [];
-  const tabEvents = extensionSession?.tabEvents ?? [];
-  const confusionCaptures = extensionSession?.confusionCaptures ?? [];
+  const tabSpans: TabSpan[] = [];
+  const tabEvents: TabEvent[] = [];
+  const confusionCaptures: ConfusionCapture[] = [];
 
   const attention = samples.length
     ? samples.filter(isSampleAttentive).length / samples.length
     : 0;
   const lookAwaySpikes = samples.length ? countLookAwaySpikes(samples, 2000) : 0;
   const lateCrash = samples.length ? detectLateCrash(samples) : false;
-  const switchRate = tabSpans.length ? computeSwitchRate(tabEvents, tabSpans) : 0;
-  const awaySwitches =
-    tabSpans.length && setup
-      ? countAwaySwitchActivations(tabEvents, tabSpans, setup.focusDomain)
-      : null;
-  const timeByType = tabSpans.length ? sumTimeByType(tabSpans) : null;
-  const topDomains = tabSpans.length ? summarizeDomainDurations(tabSpans) : null;
+  const switchRate = 0;
+  const awaySwitches = null;
+  const timeByType = null;
+  const topDomains = null;
 
   let fusionMode = "Deep Worker";
+  const thresholds = setup ? getGuardThresholdProfile(setup.guardStyle) : null;
 
-  if (switchRate >= 6) fusionMode = "Split Focus";
-  if (lateCrash && switchRate >= 3) fusionMode = "Late Crasher";
-  if (
-    tabSpans.length &&
-    (timeByType?.helperMs ?? 0) >= 180_000 &&
-    (timeByType?.helperMs ?? 0) > (timeByType?.studyMs ?? 0) * 0.6
-  ) {
-    fusionMode = "Helper Reliant";
+  if (samples.length && attention < 0.55) fusionMode = "Seat-Leaver";
+  else if (lateCrash) fusionMode = "Late Crasher";
+  else if (lookAwaySpikes >= (thresholds?.lookAwaySpikes ?? 4)) {
+    fusionMode = "Unsteady Focus";
   }
-  if (samples.length && attention < 0.65) fusionMode = "Seat-Leaver";
 
   const base = samples.length ? attention * 100 : 70;
-  const sedativePenaltyMinutes = timeByType ? timeByType.sedativeMs / 60_000 : 0;
-  const awaySwitchPenalty = awaySwitches ? awaySwitches * 2 : 0;
   const penalty =
     lookAwaySpikes * 2 +
-    switchRate * 3 +
-    awaySwitchPenalty +
-    sedativePenaltyMinutes * 2 +
     (lateCrash ? 10 : 0);
 
   const goalEvaluation = evaluateGoals(setup, {
     totalSeconds,
     lookAwaySpikes,
     awaySwitches,
-    hasTabData: tabSpans.length > 0,
+    hasTabData: false,
   });
 
   const metrics: FusionMetrics = {
@@ -1444,7 +1486,10 @@ export function createAttentionReportRecord(args: {
   } satisfies AttentionReportRecord;
 }
 
-export function calculateDailyStreak(reportHistory: AttentionReportRecord[], anchorTs = Date.now()) {
+export function calculateDailyStreak(
+  reportHistory: Array<{ goalAchieved: boolean; createdAt: number }>,
+  anchorTs = Date.now()
+) {
   const achievedDays = new Set(
     reportHistory.filter((entry) => entry.goalAchieved).map((entry) => sameDayKey(entry.createdAt))
   );

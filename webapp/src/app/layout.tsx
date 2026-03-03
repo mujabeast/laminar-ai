@@ -18,7 +18,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Laminar.AI",
-  description: "Attention diagnostics that fuse webcam and browser behavior into one study snapshot.",
+  description: "Attention diagnostics and understanding support powered by webcam signals and AI coaching.",
 };
 
 export default function RootLayout({

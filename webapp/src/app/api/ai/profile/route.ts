@@ -56,18 +56,12 @@ type RequestBody = {
     topic?: string;
     focusDomain?: string;
     targetMinutes?: number;
-    maxTabSwitches?: number;
     maxLookAwaySpikes?: number;
     guardStyle?: string;
   } | null;
   webcam?: {
     totalSeconds?: number;
     samples?: Array<{ ts: number; facePresent: boolean }>;
-  } | null;
-  extensionSession?: {
-    tabEvents?: Array<{ type?: string }>;
-    tabSpans?: Array<{ startTs: number; endTs: number; durationMs: number; domain?: string }>;
-    videoEvents?: Array<{ ts: number; type?: string }>;
   } | null;
 };
 
@@ -79,9 +73,9 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "studyRunId is required." }, { status: 400 });
     }
 
-    if (!body.webcam && !body.extensionSession) {
+    if (!body.webcam) {
       return NextResponse.json(
-        { error: "At least one session source is required." },
+        { error: "A webcam session is required." },
         { status: 400 }
       );
     }
@@ -89,7 +83,6 @@ export async function POST(request: Request) {
     const context = buildProfileContext({
       setup: body.setup ?? null,
       webcam: body.webcam ?? null,
-      extensionSession: body.extensionSession ?? null,
     });
 
     const profile = await callOpenAIJson<
@@ -102,7 +95,7 @@ export async function POST(request: Request) {
             {
               type: "input_text",
               text:
-                "You generate concise student behavior profiles from study telemetry. Blend webcam attention and browser behavior. Focus on patterns, not diagnosis. Explain strengths, risks, and one next experiment for the next session.",
+                "You generate concise student behavior profiles from webcam-based study telemetry. Focus on attention stability, restlessness, drift, and recovery patterns. Explain strengths, risks, and one next experiment for the next session.",
             },
           ],
         },
