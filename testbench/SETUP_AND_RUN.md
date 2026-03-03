@@ -1,26 +1,31 @@
 # Laminar.AI Testbench Setup And Run
 
-This document explains how a judge or tester can run Laminar.AI.
+This document is the judge-facing step-by-step guide for running Laminar.AI.
 
-## 1. Project Layout
+## 1. Repository Layout
 
-The actual app is inside:
+The repository root contains:
 
-`webapp/`
+- `webapp/`: the actual Next.js app
+- `testbench/`: this setup guide and env template
+
+All commands below should be run inside:
+
+```bash
+webapp
+```
 
 ## 2. Requirements
 
-- Node.js 20+ recommended
+- Node.js 20 or newer recommended
 - npm
 - An OpenAI API key
+- A laptop/desktop with webcam access
+- A modern Chromium-based browser is recommended for the webcam and screen-share flow
 
-## 3. Install App Dependencies
+## 3. Install Dependencies
 
-Open a terminal in:
-
-`webapp/`
-
-Run:
+Open a terminal in `webapp/` and run:
 
 ```bash
 npm install
@@ -30,23 +35,31 @@ npm install
 
 Copy:
 
-`testbench/env.example`
+```text
+testbench/env.example
+```
 
 into:
 
-`webapp/.env.local`
+```text
+webapp/.env.local
+```
 
-Then fill in:
+Then fill in at minimum:
 
-- `OPENAI_API_KEY`
+```env
+OPENAI_API_KEY=your_openai_api_key_here
+OPENAI_RESPONSES_MODEL=gpt-4.1-mini
+```
 
-Recommended default model:
+Notes:
 
-- `OPENAI_RESPONSES_MODEL=gpt-4.1-mini`
+- `OPENAI_BASE_URL` can be left blank for normal OpenAI usage.
+- Azure-related variables are optional and not required for the default setup.
 
-## 5. Run The Web App
+## 5. Run The App
 
-In `webapp/`, run:
+From `webapp/`, run:
 
 ```bash
 npm run dev
@@ -54,43 +67,89 @@ npm run dev
 
 Then open:
 
-`http://localhost:3000`
+```text
+http://localhost:3000
+```
 
-## 6. Basic Test Flow
+## 6. Optional Validation Checks
 
-1. Open Laminar.AI in the browser
-2. Create or select a profile
-3. Choose the distraction flow
-4. Fill in a study plan
-5. Start the webcam session
-6. Open the attention dashboard
-7. Generate the AI visual board / AI profile
-8. Open Understanding Coach and enter a weak topic
-9. Open the academic dashboard
-10. Generate the AI overview / AI visual board
+From `webapp/`, the project can also be checked with:
 
-## 7. Alternative Academic Test Flow
+```bash
+npm run lint
+npx tsc --noEmit
+npm run build
+```
 
-1. Open Laminar.AI
-2. Choose `I don't understand this topic`
-3. Enter student name, topic, what is confusing, and optional uploads
-4. Start the understanding session
-5. Review the academic dashboard afterward
+## 7. Main Test Flow
 
-## 8. Important Product Limitation
+Use this if you want to test the focus diagnostics flow.
 
-This prototype uses browser local storage for user data.
+1. Open Laminar.AI in the browser.
+2. Create or select a profile.
+3. Choose `I keep getting distracted`.
+4. Open the focus setup page.
+5. Fill in:
+   - student name
+   - module
+   - topic
+   - study mode
+   - optional study source
+   - guard style
+6. Start the webcam session.
+7. Grant webcam permission when prompted.
+8. Optionally click the screen-share control and share the study screen if you want event-to-screen correlation.
+9. End the session after enough telemetry has been collected.
+10. Open the dashboard and review:
+   - session context
+   - AI diagnostic
+   - telemetry visuals
+   - event-to-screen matches
+
+## 8. Academic Test Flow
+
+Use this if you want to test the academic weakness pipeline.
+
+1. Open Laminar.AI.
+2. Choose `I don't understand this topic`.
+3. Enter:
+   - student name
+   - topic
+   - what is confusing
+   - optional uploaded materials
+4. Submit the understanding flow.
+5. Open the Academic Dashboard.
+6. Review:
+   - merged weakness items
+   - AI overview
+   - mastery checkboxes
+
+## 9. Combined History Flow
+
+1. Complete at least 2 focus sessions.
+2. Complete at least 1 academic understanding entry.
+3. Open `History`.
+4. Verify that the page shows:
+   - combined attention and academic visuals
+   - progress summary
+   - cross-signal observations
+
+## 10. Important Product Limitations
+
+This prototype currently uses browser local storage.
 
 That means:
 
-- data is per browser/device
+- data is stored per browser/device
 - profiles are local only
-- data is not shared automatically across devices or teammates
+- judges testing on one machine will not see data from another machine
+- clearing browser storage will remove saved local data
 
-## 9. Deployment Note
+## 11. Deployment Note
 
-If deploying to Vercel:
+If a judge or tester wants to deploy it to Vercel:
 
-- import the repository
-- set Root Directory to `webapp`
-- add the same environment variables in Vercel
+1. Import the repository into Vercel.
+2. Set `Root Directory` to `webapp`.
+3. Add the same environment variables from `.env.local`.
+4. Deploy as a Next.js project.
