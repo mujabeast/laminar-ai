@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import { Analytics } from "@vercel/analytics/next";
 
 import { OpenAIStatusBanner } from "@/components/openai-status-banner";
 import { ProfileStatusBanner } from "@/components/profile-status-banner";
@@ -41,6 +42,7 @@ export default function RootLayout({
             </div>
           </div>
         </div>
+        <Analytics />
       </body>
     </html>
   );
